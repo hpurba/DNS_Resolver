@@ -140,7 +140,7 @@ int name_ascii_to_wire(char *name, unsigned char *wire) {
 	 */
 }
 
-char *name_ascii_from_wire(unsigned char *wire, int *indexp) {
+char *name_ascii_from_wire(unsigned char *wire, int indexp) {
 	/* 
 	 * Extract the wire-formatted DNS name at the offset specified by
 	 * *indexp in the array of bytes provided (wire) and return its string
@@ -154,6 +154,28 @@ char *name_ascii_from_wire(unsigned char *wire, int *indexp) {
 	 * OUTPUT: a string containing the string representation of the name,
 	 *              allocated on the heap.
 	 */
+	char* fullname = malloc(256);
+	int index = indexp;
+    do {
+        int size = wire[index];
+        index++;
+        char* partofname = malloc(size);
+        for (int i = 0; i < size; i++) {
+            partofname[i] = wire[index];
+            index++;
+        }
+        strncat(fullname, partofname, size);
+        if (wire[index] == 0xc0){
+            index++;
+            index = wire[index];
+            strncat(fullname, ".", 1);
+        }
+        else if (wire[index] != 0){
+            strncat(fullname, ".", 1);
+        }
+    } while (wire[index] != 0);
+
+    return fullname;
 }
 
 dns_rr rr_from_wire(unsigned char *wire, int *indexp, int query_only) {
@@ -230,7 +252,6 @@ unsigned short create_dns_query(char *qname, dns_rr_type qtype, unsigned char *w
         	byteoffset += 1;
     	}
     	token = strtok(NULL, ".");
-    	// printf("offest: %d\n", byteoffset);
 	}
 	wire[byteoffset] = 0x00;	// null label of question
 	byteoffset += 1;
@@ -244,8 +265,6 @@ unsigned short create_dns_query(char *qname, dns_rr_type qtype, unsigned char *w
 	byteoffset +=1;
 	wire[byteoffset] = 0x01;
 	byteoffset += 1;
-	// print_bytes(wire, byteoffset);
-
 	return (byteoffset);
 }
 
@@ -262,42 +281,72 @@ dns_answer_entry *get_answer_address(char *qname, dns_rr_type qtype, unsigned ch
 	 * reflecting either the name or IP address.  If
 	 */
 
-
 	int numanswers = wire[7];
 	struct dns_answer_entry* head = malloc(sizeof(dns_answer_entry));
-	struct dns_answer_entry** curr = &head;
-	int byteoffset = 0x0c; //position of first domain name
+    head->value = malloc(16);
+	struct dns_answer_entry* curr = head;
+    int byteoffset = 0x0c; //position of first domain name
+    int skipSize = 1;
+    while (skipSize != 0){
+        int sizeToSkip = wire[byteoffset];
+        byteoffset+= wire[byteoffset];
+        byteoffset+=1;
+        skipSize = sizeToSkip;
+    }
 
+    byteoffset += 16;
+    if (qtype == 5){
+        qname = name_ascii_from_wire(wire, byteoffset);
 
-	int skipSize = 1;
-	while (skipSize != 0)
-	{
-		int sizeToSkip = wire[byteoffset];
-		byteoffset+= wire[byteoffset];
-		byteoffset+=1;
-		skipSize = sizeToSkip;
-	}
+        head->value = qname;
+        dns_answer_entry* new = malloc(sizeof(struct dns_answer_entry));
+        new->value = malloc(16);
+        head->next = new;
+        curr = new;
+        byteoffset += wire[byteoffset];
+        byteoffset += 4;
+        numanswers--;
+    }
 
-	byteoffset += 16;
+    for (int i = 0; i < numanswers; i++){
+        if (qtype == 1) {
+            char *ip = malloc(16 * sizeof(char)); //good default value
+            sprintf(ip, "%d.%d.%d.%d", wire[byteoffset], wire[byteoffset + 1], wire[byteoffset + 2],
+                    wire[byteoffset + 3]);
+            printf("%s\n", ip);
+            byteoffset += 16;
+        }
+        else if (qtype == 5){
+            char* name = name_ascii_from_wire(wire, wire[byteoffset]);
+            byteoffset += 0xb;
 
-   	for (int i = 0; i < numanswers; i++){
-       	char* ip = malloc(16);
-	   	sprintf(ip, "%d.%d.%d.%d", wire[byteoffset], wire[byteoffset + 1], wire[byteoffset + 2], wire[byteoffset+ 3]); 
-       	printf("%s\n", ip);
-		byteoffset += 16; // 16
-		// LINKED LIST
-		// dns_answer_entry* old = *curr;
-      	// old->value = ip;
-       	// dns_answer_entry* new = malloc(sizeof(struct dns_answer_entry));
-       	// old->next = new;
-       	// curr = &new;
-	   	// if(i + 1 == numanswers) {
-		//    old->next = NULL;
-	   	// }
-	}
+            if (strcmp(qname, name) != 0){
+                return NULL;
+            }
 
-//    return head;
-   return NULL;
+            char *ip = malloc(16 * sizeof(char)); //good default value
+            sprintf(ip, "%d.%d.%d.%d", wire[byteoffset], wire[byteoffset + 1], wire[byteoffset + 2],
+                    wire[byteoffset + 3]);
+            byteoffset += 4;
+            dns_answer_entry* old = curr;
+            old->value = ip;
+            dns_answer_entry* new = malloc(sizeof(struct dns_answer_entry));
+            new->value = malloc(16);
+            old->next = new;
+            curr = new;
+            if (i + 1 == numanswers){
+                old->next = NULL;
+            }
+            byteoffset += 1;
+            if (wire[byteoffset] == 0){
+                break;
+            }
+        }
+    }
+    if (qtype == 5){
+        return head;
+    }
+    return NULL;
 }
 
 // USE THIS!!!
@@ -320,7 +369,6 @@ int send_recv_message(unsigned char *request, int requestlen, unsigned char *res
     size_t len;
     ssize_t nread;
 
-    /* Obtain address(es) matching host/port */
     memset(&hints, 0, sizeof(struct addrinfo));
     hints.ai_family = AF_UNSPEC;    /* Allow IPv4 or IPv6 */
     hints.ai_socktype = SOCK_DGRAM; /* Datagram socket */
@@ -330,10 +378,7 @@ int send_recv_message(unsigned char *request, int requestlen, unsigned char *res
     if (s != 0) {
         fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(s));
     }
-    /* getaddrinfo() returns a list of address structures.
-       Try each address until we successfully connect(2).
-       If socket(2) (or connect(2)) fails, we (close the socket
-       and) try the next address. */
+
     for (rp = result; rp != NULL; rp = rp->ai_next) {
         sfd = socket(rp->ai_family, rp->ai_socktype,
                      rp->ai_protocol);
@@ -367,12 +412,19 @@ dns_answer_entry *resolve(char *qname, char *server, char *port) {
     wire = (char*) malloc(256 * sizeof(char));
     dns_rr_type type = 1;
     unsigned short lengthOfWire = create_dns_query(qname, type, wire);
-	// print_bytes(wire, lengthOfWire); // This prints the wire
     char response[BUF_SIZE];
-    int responseLength = send_recv_message(wire, lengthOfWire, response, server, port);
+    send_recv_message(wire, lengthOfWire, response, server, port);
+    int skipSize = 1;
+    int byteoffset = 0xc;
+    while (skipSize != 0){
+        int sizeToSkip = wire[byteoffset];
+        byteoffset+= wire[byteoffset];
+        byteoffset+=1;
+        skipSize = sizeToSkip;
+    }
+    byteoffset += 7;
+    type = response[byteoffset];
     struct dns_answer_entry* list = get_answer_address(qname, type, response);
-	// print_bytes(response, responseLength); // This prints the response
-
     return list;
 }
 
